@@ -1,0 +1,5 @@
+{
+    "rider1": {"height": 177, "weight": 72, "age": 28, "gender": "M"},
+    "rider2": {"height": 170, "weight": 60, "age": 35, "gender": "M"},
+    "rider3": {"height": 181, "weight": 80, "age": 29, "gender": "M"}
+  }
