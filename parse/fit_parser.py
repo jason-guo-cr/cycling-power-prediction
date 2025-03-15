@@ -4,25 +4,50 @@ import pandas as pd
 import os
 import glob
 
-def parse_fit_file(fit_file_path, output_csv_path=None):
+def parse_fit_file(fit_file_path, output_csv_path=None, require_power=True):
     """
     解析FIT文件并提取相关骑行数据
     
     参数:
     fit_file_path: FIT文件路径
     output_csv_path: 输出的CSV文件路径，如果为None则不保存文件
+    require_power: 是否要求数据包含功率信息
     
     返回:
-    pandas DataFrame包含解析后的数据
+    pandas DataFrame包含解析后的数据，如果不符合条件则返回None
     """
     print(f"解析文件: {fit_file_path}")
     
     # 使用fitparse库读取FIT文件
     fitfile = FitFile(fit_file_path)
     
-    # 检查可用字段 - 添加这段代码来检查所有可用字段
+    # 检查活动类型
+    activity_type = None
+    for session in fitfile.get_messages('session'):
+        for field in session:
+            if field.name == 'sport' and field.value is not None:
+                activity_type = field.value
+                break
+    
+    # 如果无法从session获取，尝试从activity获取
+    if activity_type is None:
+        for activity in fitfile.get_messages('activity'):
+            for field in activity:
+                if field.name == 'sport' and field.value is not None:
+                    activity_type = field.value
+                    break
+    
+    print(f"检测到的活动类型: {activity_type}")
+    
+    # 如果不是骑行活动，返回None
+    if activity_type is not None and activity_type != 'cycling':
+        print(f"不是骑行活动，跳过处理")
+        return None
+    
+    # 检查可用字段
     print("\n可用字段检查:")
     available_fields = set()
+    has_power = False
     sample_record = None
     for i, record in enumerate(fitfile.get_messages('record')):
         if i == 0:
@@ -30,10 +55,18 @@ def parse_fit_file(fit_file_path, output_csv_path=None):
         for field in record:
             if field.value is not None:
                 available_fields.add(field.name)
+                if field.name == 'power' and field.value is not None:
+                    has_power = True
         if i > 10:  # 只检查前几条记录即可
             break
     
     print(f"检测到的字段: {sorted(available_fields)}")
+    print(f"是否包含功率数据: {has_power}")
+    
+    # 如果要求功率数据但没有，则返回None
+    if require_power and not has_power:
+        print("未找到功率数据，跳过处理")
+        return None
     
     # 如果有样本记录，打印详细信息
     if sample_record:
@@ -63,6 +96,11 @@ def parse_fit_file(fit_file_path, output_csv_path=None):
     # 创建DataFrame
     if records:
         df = pd.DataFrame(records)
+        
+        # 如果要求功率但DataFrame中没有功率列，返回None
+        if require_power and 'power' not in df.columns:
+            print("DataFrame中没有功率数据，跳过处理")
+            return None
         
         # 处理enhanced_altitude字段 - 如果没有altitude但有enhanced_altitude，则使用enhanced_altitude
         if 'altitude' not in df.columns and 'enhanced_altitude' in df.columns:
@@ -141,7 +179,7 @@ def display_ride_summary(df, filename):
         df: 包含骑行数据的DataFrame
         filename: 文件名
     """
-    if df.empty:
+    if df is None or df.empty:
         print(f"{filename}: 没有找到骑行数据")
         return
     
@@ -173,15 +211,21 @@ def display_ride_summary(df, filename):
         avg_hr = df['heart_rate'].mean()
         print(f"平均心率: {avg_hr:.0f} bpm")
     
+    # 显示平均功率
+    if 'power' in df.columns:
+        avg_power = df['power'].mean()
+        print(f"平均功率: {avg_power:.0f} W")
+    
     print("-" * 50)
 
-def process_fit_directory(directory_path, output_directory=None):
+def process_fit_directory(directory_path, output_directory=None, only_cycling_with_power=True):
     """
     处理目录中的所有.fit文件
     
     参数:
         directory_path: 包含.fit文件的目录路径
         output_directory: 输出CSV文件的目录路径（可选）
+        only_cycling_with_power: 是否只处理带有功率的骑行数据
     """
     if output_directory is None:
         output_directory = directory_path
@@ -197,6 +241,8 @@ def process_fit_directory(directory_path, output_directory=None):
         return
     
     print(f"找到 {len(fit_files)} 个.fit文件")
+    processed_count = 0
+    skipped_count = 0
     
     # 处理每个文件
     for fit_path in fit_files:
@@ -205,12 +251,18 @@ def process_fit_directory(directory_path, output_directory=None):
         
         try:
             # 解析fit文件
-            df = parse_fit_file(fit_path)
+            df = parse_fit_file(fit_path, require_power=only_cycling_with_power)
             
-            # 检查解析后的数据框架 - 添加这一部分
+            # 如果返回的df为None，说明不符合条件
+            if df is None:
+                print(f"跳过文件 {filename}: 不符合要求(不是骑行数据或没有功率数据)")
+                skipped_count += 1
+                continue
+            
+            # 检查解析后的数据框架
             print("\n解析后的CSV数据:")
-            print(f"数据行数: {len(df) if df is not None else 0}")
-            if df is not None and not df.empty:
+            print(f"数据行数: {len(df)}")
+            if not df.empty:
                 print(f"数据列: {df.columns.tolist()}")
                 print("\n数据预览:")
                 print(df.head(3))
@@ -227,18 +279,22 @@ def process_fit_directory(directory_path, output_directory=None):
             
             # 显示骑行摘要
             display_ride_summary(df, filename)
+            processed_count += 1
             
         except Exception as e:
             print(f"处理文件 {filename} 时出错: {str(e)}")
+            skipped_count += 1
+    
+    print(f"\n处理完成: 成功处理 {processed_count} 个文件，跳过 {skipped_count} 个文件")
 
 def main():
     # 设置数据目录
-    data_directory = "E:\\open-code\\flash-idea\\sport-data-analysis\\source-data\\test\\fit"  # 替换为你的数据目录路径
-    output_directory = "E:\\open-code\\flash-idea\\sport-data-analysis\\source-data\\test"  # 替换为你想要保存CSV文件的目录路径
+    data_directory = "E:\\open-code\\flash-idea\\cycling-power-prediction\\encoder\\data\\fit"  # 替换为你的数据目录路径
+    output_directory = "E:\\open-code\\flash-idea\\cycling-power-prediction\\encoder\\data\\test_parse"  # 替换为你想要保存CSV文件的目录路径
     
     try:
-        # 处理目录中的所有.fit文件
-        process_fit_directory(data_directory, output_directory)
+        # 处理目录中的所有.fit文件，只保留带有功率的骑行数据
+        process_fit_directory(data_directory, output_directory, only_cycling_with_power=True)
         
     except Exception as e:
         print(f"处理目录时出错: {str(e)}")
